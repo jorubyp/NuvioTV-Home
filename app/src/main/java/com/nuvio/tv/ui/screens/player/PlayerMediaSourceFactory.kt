@@ -37,6 +37,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import com.nuvio.tv.core.network.IPv4FirstDns
+import com.nuvio.tv.core.torrent.TorrServerBinary
 import com.nuvio.tv.data.local.PlayerSettings
 import com.nuvio.tv.data.local.VodCacheSizeMode
 import okhttp3.ConnectionPool
@@ -232,8 +233,12 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
                 shouldAllowBackgroundPrefetch = { parallelStartupPrefetchUnlocked.get() },
                 onResolvedUri = { resolved -> currentVodCacheResolvedUrl = resolved?.toString() }
             )
-        } else if (isLoopbackUrl(url)) {
-            PlayerPlaybackNetworking.createHttpDataSourceFactory(sanitizedHeaders, useLongReadTimeout = true)
+        } else if (isLoopbackNonTorrServerUrl(url)) {
+            // Non-torrent loopback streams (e.g. Usenet, local proxies) must stay on
+            // direct OkHttpDataSource with persistent connection pooling. If routed through
+            // DefaultDataSource, LocalhostZeroCopyDataSource intercepts 127.0.0.1 and drops
+            // the socket on every container seek with Connection: close, aborting streaming contexts.
+            PlayerPlaybackNetworking.createHttpDataSourceFactory(sanitizedHeaders)
         } else {
             httpDataSourceFactory
         }
@@ -555,9 +560,14 @@ internal class PlayerMediaSourceFactory(private val context: Context) {
             )
         }
 
-        internal fun isLoopbackUrl(url: String): Boolean {
-            val host = url.toHttpUrlOrNull()?.host ?: return false
-            return host == "127.0.0.1" || host == "::1" || host.equals("localhost", ignoreCase = true)
+        internal fun isLoopbackNonTorrServerUrl(url: String): Boolean {
+            val httpUrl = url.toHttpUrlOrNull() ?: return false
+            val host = httpUrl.host
+            val isLoopback = host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)
+            if (!isLoopback) return false
+            val port = httpUrl.port
+            val isTorrServer = port == TorrServerBinary.PORT || port == 8090 || httpUrl.queryParameter("link") != null
+            return !isTorrServer
         }
 
         fun parseHeaders(headers: String?): Map<String, String> {
